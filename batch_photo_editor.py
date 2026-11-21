@@ -8,6 +8,9 @@ from PIL import Image, ImageEnhance, ImageOps, ImageTk
 
 # Совместимость со старыми версиями Pillow (< 9.1)
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
+_TRANSPOSE = getattr(Image, "Transpose", Image)
+# угол поворота против часовой стрелки -> операция Pillow (без потерь качества)
+ROTATE_OPS = {90: _TRANSPOSE.ROTATE_90, 180: _TRANSPOSE.ROTATE_180, 270: _TRANSPOSE.ROTATE_270}
 
 VALID_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 MAX_SIZE = 20000          # верхняя граница ширины/высоты при обрезке
@@ -120,6 +123,8 @@ def enhance(img, brightness, sharpness, shadows=0.0):
 def transform_image(img, s):
     """Единая функция обработки: используется и в предпросмотре, и в пакете."""
     res = normalize_mode(img)
+    if s["rotate"]:
+        res = res.transpose(ROTATE_OPS[s["rotate"]])
     if s["crop"]:
         res = apply_crop(res, s["mode"], s["tw"], s["th"], s["ratio"], s["cx"], s["cy"])
     return enhance(res, s["brightness"], s["sharpness"], s["shadows"])
@@ -161,7 +166,7 @@ def list_images(folder):
 class BatchPhotoEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("Пакетный редактор фото v3.2 (с предпросмотром)")
+        self.root.title("Пакетный редактор фото v3.3 (с предпросмотром)")
         self.root.geometry("960x740")
         self.root.minsize(900, 720)
 
@@ -176,6 +181,7 @@ class BatchPhotoEditor:
         self._after_id = None       # для debounce предпросмотра
         self.queue = queue.Queue()
         self.is_running = False
+        self.rotation = 0           # поворот против часовой стрелки: 0/90/180/270
 
         self.create_widgets()
 
@@ -201,7 +207,19 @@ class BatchPhotoEditor:
         self.preview_label.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.info_label = tk.Label(right_col, text="", fg="#555555", font=("Arial", 9))
-        self.info_label.pack(pady=(0, 8))
+        self.info_label.pack(pady=(0, 4))
+
+        # --- поворот (применяется ко всем фото при обработке) ---
+        rot_frame = tk.Frame(right_col)
+        rot_frame.pack(pady=(0, 8))
+        tk.Button(rot_frame, text="↺ Влево 90°", width=12,
+                  command=lambda: self.rotate_image(90)).pack(side="left", padx=3)
+        tk.Button(rot_frame, text="↻ Вправо 90°", width=12,
+                  command=lambda: self.rotate_image(-90)).pack(side="left", padx=3)
+        tk.Button(rot_frame, text="Сбросить", width=9,
+                  command=self.reset_rotation).pack(side="left", padx=3)
+        self.rot_label = tk.Label(rot_frame, text="Поворот: 0°", fg="#555555", width=18)
+        self.rot_label.pack(side="left", padx=(8, 0))
 
         # --- 1. Папки ---
         frame_dirs = tk.LabelFrame(left_col, text="1. Папки", padx=10, pady=8)
@@ -345,6 +363,18 @@ class BatchPhotoEditor:
             if mode_idx == 2:
                 self.lbl_hint.grid(row=6, column=0, columnspan=4, sticky="w")
 
+    def rotate_image(self, delta):
+        """delta: +90 — влево (против часовой), -90 — вправо."""
+        self.rotation = (self.rotation + delta) % 360
+        names = {0: "0°", 90: "влево 90°", 180: "180°", 270: "вправо 90°"}
+        self.rot_label.config(text=f"Поворот: {names[self.rotation]}")
+        self.schedule_preview()
+
+    def reset_rotation(self):
+        self.rotation = 0
+        self.rot_label.config(text="Поворот: 0°")
+        self.schedule_preview()
+
     def reset_center(self):
         self.center_x_scale.set(0)
         self.center_y_scale.set(0)
@@ -392,6 +422,7 @@ class BatchPhotoEditor:
             "brightness": float(self.brightness_scale.get()),
             "sharpness": float(self.sharpness_scale.get()),
             "shadows": float(self.shadows_scale.get()),
+            "rotate": self.rotation,
             "cx": (0.5 + self.center_x_scale.get() / 200.0) if crop else 0.5,
             "cy": (0.5 + self.center_y_scale.get() / 200.0) if crop else 0.5,
         }
@@ -474,8 +505,9 @@ class BatchPhotoEditor:
             self.preview_label.config(image="", text=f"Ошибка предпросмотра:\n{e}")
             return
 
-        out = crop_size(self.sample_size, s["mode"], s["tw"], s["th"], s["ratio"]) \
-            if s["crop"] else self.sample_size
+        rot_size = self.sample_size[::-1] if self.rotation in (90, 270) else self.sample_size
+        out = crop_size(rot_size, s["mode"], s["tw"], s["th"], s["ratio"]) \
+            if s["crop"] else rot_size
         self.info_label.config(
             text=f"Оригинал: {self.sample_size[0]}×{self.sample_size[1]}  →  "
                  f"результат: {out[0]}×{out[1]}",
